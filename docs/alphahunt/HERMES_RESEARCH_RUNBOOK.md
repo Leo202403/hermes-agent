@@ -35,6 +35,14 @@ python -m gateway.alphahunt.research_yaml --validate <research.yaml>
 5. For AlphaHunt dry-run import, follow
    `docs/alphahunt/INTEGRATION_DRYRUN.md`.
 
+For ongoing projects, use `analysis_mode: project_update_research` rather than
+the initial project YAML generator. That mode reviews previous thesis,
+watchpoints, latest source data, explicit data gaps, and breach/recheck-due
+state semantically, then returns an update markdown body plus update YAML.
+Closed items use `analysis_mode: post_mortem_research` to produce read-only
+source/rule/threshold evolution proposals. See
+`docs/alphahunt/PROJECT_UPDATE_RESEARCH.md`.
+
 ## Boundaries
 
 Hermes research output is reference-only. It must not call live AlphaHunt APIs,

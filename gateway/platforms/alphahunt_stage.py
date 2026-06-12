@@ -19,11 +19,16 @@ import requests
 logger = logging.getLogger(__name__)
 
 STAGE_MODES = frozenset({"cleaner", "screener", "sentinel", "packager"})
-QWEN_MODES = STAGE_MODES | frozenset({"fast_triage"})
+RESEARCH_MODES = frozenset({"project_update_research", "post_mortem_research"})
+CODEX_MODES = STAGE_MODES | RESEARCH_MODES
+QWEN_MODES = CODEX_MODES | frozenset({"fast_triage"})
 QWEN_ANALYZER = "qwen_7b_local"
 QWEN_MODEL = "qwen2.5:7b"
 CODEX_ANALYZER = "codex_spark"
-CODEX_MODEL = os.environ.get("HERMES_CODEX_SPARK_MODEL", "gpt-5.3-codex-spark").strip() or "gpt-5.3-codex-spark"
+CODEX_MODEL = (
+    os.environ.get("HERMES_CODEX_SPARK_MODEL", "gpt-5.3-codex-spark").strip()
+    or "gpt-5.3-codex-spark"
+)
 DEFAULT_CODEX_BIN = "/home/leo/.hermes/node/bin/codex"
 DEFAULT_CODEX_TIMEOUT_SEC = 180
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
@@ -55,6 +60,21 @@ PROMPTS: Dict[str, str] = {
         "你是一过筛 (fast_triage) 员。输入是 raw_snapshot 或 normalized_event。你只判断该事件"
         "是否有进入 4-stage agent chain 的价值。输出严格 JSON。"
     ),
+    "project_update_research": (
+        "你是 AlphaHunt project update researcher。输入包含 previous thesis、watchpoints、"
+        "latest source data、data_gap、breach/recheck_due 和/或 Hermes update research task/artifact。"
+        "你必须做语义级复查：判断证据变化是否真的改变 thesis、risk、invalidation、observables，"
+        "不要只做 rule_v1 机械映射。缺数据必须进入 data_gap，禁止补造数值或来源。"
+        "输出 update_markdown 与 update_yaml。update_yaml 必须包含 changed_evidence、thesis_delta、"
+        "risk_delta、invalidation_delta、observables_update、next_check_at、confidence、action_suggestion。"
+        "只做研究和记录建议；不交易、不下注、不发通知、不调用外部接口。"
+    ),
+    "post_mortem_research": (
+        "你是 AlphaHunt post-mortem researcher。输入是已结案 opportunity/project、previous thesis、"
+        "最终结果、触发/未触发 watchpoints、数据缺口和已有 post_mortem notes。"
+        "你必须总结错因，并提出 source/rule/threshold evolution proposal。"
+        "缺数据必须进入 data_gap；proposal 只能是 enforced=false 的研究建议，禁止自动执行、交易、下注、通知或写库。"
+    ),
 }
 
 SCHEMA_VERSION_BY_MODE = {
@@ -63,6 +83,8 @@ SCHEMA_VERSION_BY_MODE = {
     "sentinel": "sentinel_output_v1",
     "packager": "packager_output_v1",
     "fast_triage": "fast_triage_v1",
+    "project_update_research": "hermes_update_research_v1",
+    "post_mortem_research": "post_mortem_research_v1",
 }
 
 OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
@@ -74,7 +96,13 @@ OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "reason": {"type": "string"},
             "normalized_event": {
                 "type": "object",
-                "required": ["event_id", "asset_class", "event_type", "source", "normalized_fields"],
+                "required": [
+                    "event_id",
+                    "asset_class",
+                    "event_type",
+                    "source",
+                    "normalized_fields",
+                ],
                 "properties": {
                     "event_id": {"type": "string", "minLength": 1},
                     "asset_class": {"type": "string", "minLength": 1},
@@ -100,7 +128,13 @@ OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "reason": {"type": "string"},
             "opportunity_candidate": {
                 "type": "object",
-                "required": ["opportunity_id", "asset_class", "base_fields", "asset_specific_fields", "decision_fields"],
+                "required": [
+                    "opportunity_id",
+                    "asset_class",
+                    "base_fields",
+                    "asset_specific_fields",
+                    "decision_fields",
+                ],
                 "properties": {
                     "opportunity_id": {"type": "string", "minLength": 1},
                     "asset_class": {"type": "string", "minLength": 1},
@@ -127,7 +161,10 @@ OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "risk_veto": {
                 "type": "object",
                 "required": ["active"],
-                "properties": {"active": {"type": "boolean"}, "reason": {"type": "string"}},
+                "properties": {
+                    "active": {"type": "boolean"},
+                    "reason": {"type": "string"},
+                },
             },
             "blocking_rules": {"type": "array"},
         },
@@ -150,7 +187,13 @@ OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 "properties": {
                     "normalized_event": {
                         "type": "object",
-                        "required": ["event_id", "asset_class", "event_type", "source", "normalized_fields"],
+                        "required": [
+                            "event_id",
+                            "asset_class",
+                            "event_type",
+                            "source",
+                            "normalized_fields",
+                        ],
                         "properties": {
                             "event_id": {"type": "string", "minLength": 1},
                             "asset_class": {"type": "string", "minLength": 1},
@@ -172,7 +215,10 @@ OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
                             "opportunity_id": {"type": "string", "minLength": 1},
                             "asset_class": {"type": "string", "minLength": 1},
                             "base_fields": {"type": "object", "minProperties": 1},
-                            "asset_specific_fields": {"type": "object", "minProperties": 1},
+                            "asset_specific_fields": {
+                                "type": "object",
+                                "minProperties": 1,
+                            },
                             "decision_fields": {"type": "object", "minProperties": 1},
                         },
                     },
@@ -184,7 +230,10 @@ OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
                             "risk_veto": {
                                 "type": "object",
                                 "required": ["active"],
-                                "properties": {"active": {"type": "boolean"}, "reason": {"type": "string"}},
+                                "properties": {
+                                    "active": {"type": "boolean"},
+                                    "reason": {"type": "string"},
+                                },
                             },
                             "blocking_rules": {"type": "array"},
                         },
@@ -201,7 +250,13 @@ OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
     },
     "fast_triage": {
         "type": "object",
-        "required": ["status", "triage_decision", "reason", "matched_signals", "data_gap"],
+        "required": [
+            "status",
+            "triage_decision",
+            "reason",
+            "matched_signals",
+            "data_gap",
+        ],
         "properties": {
             "status": {"const": "ok"},
             "triage_decision": {"enum": ["advance", "reject", "needs_human"]},
@@ -209,6 +264,98 @@ OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "matched_signals": {"type": "array", "items": {"type": "string"}},
             "data_gap": {"type": "array"},
         },
+    },
+    "project_update_research": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+            "status": {"enum": ["ok", "rejected", "error"]},
+            "reason": {"type": "string"},
+            "update_markdown": {"type": "string", "minLength": 1},
+            "update_yaml": {
+                "type": "object",
+                "required": [
+                    "changed_evidence",
+                    "thesis_delta",
+                    "risk_delta",
+                    "invalidation_delta",
+                    "observables_update",
+                    "next_check_at",
+                    "confidence",
+                    "action_suggestion",
+                    "data_gap",
+                ],
+                "properties": {
+                    "changed_evidence": {"type": "array", "items": {"type": "object"}},
+                    "thesis_delta": {"type": "string", "minLength": 1},
+                    "risk_delta": {"type": "array", "items": {"type": "string"}},
+                    "invalidation_delta": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "observables_update": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                    },
+                    "next_check_at": {"type": "string", "minLength": 1},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "action_suggestion": {
+                        "enum": [
+                            "no_change",
+                            "observe",
+                            "research",
+                            "manual_review",
+                            "deprioritize",
+                            "archive",
+                        ]
+                    },
+                    "data_gap": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        },
+        "allOf": [
+            {
+                "if": {"properties": {"status": {"const": "ok"}}},
+                "then": {"required": ["update_markdown", "update_yaml"]},
+            }
+        ],
+    },
+    "post_mortem_research": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+            "status": {"enum": ["ok", "rejected", "error"]},
+            "reason": {"type": "string"},
+            "post_mortem_markdown": {"type": "string", "minLength": 1},
+            "evolution_proposal": {
+                "type": "object",
+                "required": [
+                    "source_evolution",
+                    "rule_evolution",
+                    "threshold_evolution",
+                    "data_gap",
+                    "confidence",
+                    "enforced",
+                ],
+                "properties": {
+                    "source_evolution": {"type": "array", "items": {"type": "object"}},
+                    "rule_evolution": {"type": "array", "items": {"type": "object"}},
+                    "threshold_evolution": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                    },
+                    "data_gap": {"type": "array", "items": {"type": "string"}},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "enforced": {"const": False},
+                },
+            },
+        },
+        "allOf": [
+            {
+                "if": {"properties": {"status": {"const": "ok"}}},
+                "then": {"required": ["post_mortem_markdown", "evolution_proposal"]},
+            }
+        ],
     },
 }
 
@@ -228,14 +375,17 @@ def is_alphahunt_stage_payload(payload: Dict[str, Any]) -> bool:
     mode = str(payload.get("analysis_mode") or "").strip().lower()
     if mode == "fast_triage":
         return True
-    if mode not in STAGE_MODES:
+    if mode not in CODEX_MODES:
         return False
     ctx = payload.get("context") if isinstance(payload.get("context"), dict) else {}
-    routing = ctx.get("routing_policy") if isinstance(ctx.get("routing_policy"), dict) else {}
+    routing = (
+        ctx.get("routing_policy") if isinstance(ctx.get("routing_policy"), dict) else {}
+    )
     engine = str(routing.get("preferred_engine") or "").strip().lower()
     return (
         not engine
-        or engine in {"qwen_local", "qwen_7b_local", CODEX_ANALYZER, "codex", "codex_local"}
+        or engine
+        in {"qwen_local", "qwen_7b_local", CODEX_ANALYZER, "codex", "codex_local"}
         or engine.startswith("qwen")
         or engine.startswith("codex")
     )
@@ -247,11 +397,11 @@ def is_qwen_analysis_payload(payload: Dict[str, Any]) -> bool:
 
 
 def _analyzer_for_mode(mode: str) -> str:
-    return CODEX_ANALYZER if mode in STAGE_MODES else QWEN_ANALYZER
+    return CODEX_ANALYZER if mode in CODEX_MODES else QWEN_ANALYZER
 
 
 def _model_for_mode(mode: str) -> str:
-    return CODEX_MODEL if mode in STAGE_MODES else QWEN_MODEL
+    return CODEX_MODEL if mode in CODEX_MODES else QWEN_MODEL
 
 
 def build_prompt(payload: Dict[str, Any], *, validation_error: str = "") -> str:
@@ -294,7 +444,9 @@ def expected_output_shape(mode: str) -> Dict[str, Any]:
                 "asset_class": "<asset class>",
                 "base_fields": {"source_event_id": "<event id>"},
                 "asset_specific_fields": {"instrument": "<instrument>"},
-                "decision_fields": {"screening_decision": "<candidate|reject|needs_human>"},
+                "decision_fields": {
+                    "screening_decision": "<candidate|reject|needs_human>"
+                },
             },
         },
         "sentinel": {
@@ -318,7 +470,9 @@ def expected_output_shape(mode: str) -> Dict[str, Any]:
                     "asset_class": "<asset class>",
                     "base_fields": {"source_event_id": "<event id>"},
                     "asset_specific_fields": {"instrument": "<instrument>"},
-                    "decision_fields": {"screening_decision": "<candidate|reject|needs_human>"},
+                    "decision_fields": {
+                        "screening_decision": "<candidate|reject|needs_human>"
+                    },
                 },
                 "risk_review": {
                     "risks": [],
@@ -334,6 +488,61 @@ def expected_output_shape(mode: str) -> Dict[str, Any]:
             "matched_signals": [],
             "data_gap": [],
         },
+        "project_update_research": {
+            "status": "ok",
+            "update_markdown": "# Project Update\n\nSemantic review based on supplied evidence only.",
+            "update_yaml": {
+                "changed_evidence": [
+                    {
+                        "source": "<source name or URL>",
+                        "observation": "<what changed>",
+                        "impact": "<why it matters>",
+                    }
+                ],
+                "thesis_delta": "No thesis change unless supplied evidence changes a core assumption.",
+                "risk_delta": ["<risk change or no material change>"],
+                "invalidation_delta": ["<invalidation change or no material change>"],
+                "observables_update": [
+                    {
+                        "name": "<observable>",
+                        "previous_status": "<prior status>",
+                        "current_status": "<current status>",
+                        "semantic_assessment": "<meaning>",
+                    }
+                ],
+                "next_check_at": "<ISO8601>",
+                "confidence": 0.5,
+                "action_suggestion": "manual_review",
+                "data_gap": [],
+            },
+        },
+        "post_mortem_research": {
+            "status": "ok",
+            "post_mortem_markdown": "# Post-Mortem Research\n\nClosed-item error review based on supplied evidence only.",
+            "evolution_proposal": {
+                "source_evolution": [
+                    {
+                        "proposal": "<source reliability or coverage adjustment>",
+                        "rationale": "<observed error pattern>",
+                    }
+                ],
+                "rule_evolution": [
+                    {
+                        "proposal": "<rule adjustment>",
+                        "rationale": "<why this would have helped>",
+                    }
+                ],
+                "threshold_evolution": [
+                    {
+                        "proposal": "<threshold adjustment>",
+                        "rationale": "<observed miss/false-positive pattern>",
+                    }
+                ],
+                "data_gap": [],
+                "confidence": 0.5,
+                "enforced": False,
+            },
+        },
     }
     return {
         "output": {
@@ -347,7 +556,10 @@ def expected_output_shape(mode: str) -> Dict[str, Any]:
 
 
 def call_ollama(prompt: str, *, timeout: int = DEFAULT_QWEN_TIMEOUT_SEC) -> str:
-    url = os.environ.get("HERMES_QWEN_OLLAMA_URL", DEFAULT_OLLAMA_URL).strip() or DEFAULT_OLLAMA_URL
+    url = (
+        os.environ.get("HERMES_QWEN_OLLAMA_URL", DEFAULT_OLLAMA_URL).strip()
+        or DEFAULT_OLLAMA_URL
+    )
     model = os.environ.get("HERMES_QWEN_MODEL", QWEN_MODEL).strip() or QWEN_MODEL
     num_predict = _env_int("HERMES_QWEN_NUM_PREDICT", DEFAULT_QWEN_NUM_PREDICT)
     num_ctx = _env_int("HERMES_QWEN_NUM_CTX", DEFAULT_QWEN_NUM_CTX)
@@ -368,10 +580,18 @@ def call_ollama(prompt: str, *, timeout: int = DEFAULT_QWEN_TIMEOUT_SEC) -> str:
 
 
 def call_codex_spark(prompt: str, *, timeout: int = DEFAULT_CODEX_TIMEOUT_SEC) -> str:
-    codex_bin = os.environ.get("HERMES_CODEX_BIN", DEFAULT_CODEX_BIN).strip() or DEFAULT_CODEX_BIN
+    codex_bin = (
+        os.environ.get("HERMES_CODEX_BIN", DEFAULT_CODEX_BIN).strip()
+        or DEFAULT_CODEX_BIN
+    )
     workdir = os.environ.get("HERMES_CODEX_WORKDIR", os.getcwd()).strip() or os.getcwd()
-    request_timeout = max(10, min(timeout, _env_int("HERMES_CODEX_TIMEOUT_SEC", DEFAULT_CODEX_TIMEOUT_SEC)))
-    with tempfile.NamedTemporaryFile("w+", encoding="utf-8", suffix=".txt", delete=False) as out_file:
+    request_timeout = max(
+        10,
+        min(timeout, _env_int("HERMES_CODEX_TIMEOUT_SEC", DEFAULT_CODEX_TIMEOUT_SEC)),
+    )
+    with tempfile.NamedTemporaryFile(
+        "w+", encoding="utf-8", suffix=".txt", delete=False
+    ) as out_file:
         output_path = out_file.name
     cmd = [
         codex_bin,
@@ -410,7 +630,9 @@ def call_codex_spark(prompt: str, *, timeout: int = DEFAULT_CODEX_TIMEOUT_SEC) -
         except Exception:
             pass
     if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "Codex Spark analysis failed").strip()
+        detail = (
+            completed.stderr or completed.stdout or "Codex Spark analysis failed"
+        ).strip()
         raise RuntimeError(detail[-2000:])
     text = output_text or (completed.stdout or "").strip()
     if not text:
@@ -436,7 +658,9 @@ def parse_json_object(text: str) -> Dict[str, Any]:
 
 
 def validate_output(mode: str, callback: Dict[str, Any]) -> Tuple[bool, str]:
-    output = callback.get("output") if isinstance(callback.get("output"), dict) else None
+    output = (
+        callback.get("output") if isinstance(callback.get("output"), dict) else None
+    )
     if output is None:
         return False, "missing output object"
     expected = {
@@ -454,7 +678,10 @@ def validate_output(mode: str, callback: Dict[str, Any]) -> Tuple[bool, str]:
     try:
         from jsonschema import Draft202012Validator
 
-        errors = sorted(Draft202012Validator(OUTPUT_SCHEMAS[mode]).iter_errors(stage_output), key=lambda e: e.path)
+        errors = sorted(
+            Draft202012Validator(OUTPUT_SCHEMAS[mode]).iter_errors(stage_output),
+            key=lambda e: e.path,
+        )
         if errors:
             return False, errors[0].message
     except ImportError:
@@ -462,12 +689,18 @@ def validate_output(mode: str, callback: Dict[str, Any]) -> Tuple[bool, str]:
     return True, ""
 
 
-def _validate_stage_output_minimal(mode: str, stage_output: Dict[str, Any]) -> Tuple[bool, str]:
+def _validate_stage_output_minimal(
+    mode: str, stage_output: Dict[str, Any]
+) -> Tuple[bool, str]:
     status = stage_output.get("status")
     if mode == "fast_triage":
         if status != "ok":
             return False, "status must be ok"
-        if stage_output.get("triage_decision") not in {"advance", "reject", "needs_human"}:
+        if stage_output.get("triage_decision") not in {
+            "advance",
+            "reject",
+            "needs_human",
+        }:
             return False, "invalid triage_decision"
         for key in ("reason", "matched_signals", "data_gap"):
             if key not in stage_output:
@@ -482,17 +715,48 @@ def _validate_stage_output_minimal(mode: str, stage_output: Dict[str, Any]) -> T
         "screener": ("opportunity_candidate",),
         "sentinel": ("risks", "risk_veto"),
         "packager": ("context_packet",),
+        "project_update_research": ("update_markdown", "update_yaml"),
+        "post_mortem_research": ("post_mortem_markdown", "evolution_proposal"),
     }
     for key in required_by_mode[mode]:
         if key not in stage_output:
             return False, f"{key} is required"
+    if mode == "project_update_research":
+        update_yaml = stage_output.get("update_yaml")
+        if not isinstance(update_yaml, dict):
+            return False, "update_yaml is required"
+        for key in (
+            "changed_evidence",
+            "thesis_delta",
+            "risk_delta",
+            "invalidation_delta",
+            "observables_update",
+            "next_check_at",
+            "confidence",
+            "action_suggestion",
+            "data_gap",
+        ):
+            if key not in update_yaml:
+                return False, f"update_yaml.{key} is required"
+    if mode == "post_mortem_research":
+        proposal = stage_output.get("evolution_proposal")
+        if not isinstance(proposal, dict):
+            return False, "evolution_proposal is required"
+        if proposal.get("enforced") is not False:
+            return False, "evolution_proposal.enforced must be false"
     return True, ""
 
 
-def normalize_callback(payload: Dict[str, Any], model_obj: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_callback(
+    payload: Dict[str, Any], model_obj: Dict[str, Any]
+) -> Dict[str, Any]:
     mode = str(payload.get("analysis_mode") or "").strip().lower()
-    analysis_id = str(payload.get("analysis_id") or payload.get("request_id") or "").strip()
-    output = model_obj.get("output") if isinstance(model_obj.get("output"), dict) else None
+    analysis_id = str(
+        payload.get("analysis_id") or payload.get("request_id") or ""
+    ).strip()
+    output = (
+        model_obj.get("output") if isinstance(model_obj.get("output"), dict) else None
+    )
     if output is None:
         output = {"stage_output": model_obj}
     output = dict(output)
@@ -513,7 +777,9 @@ def normalize_callback(payload: Dict[str, Any], model_obj: Dict[str, Any]) -> Di
 
 
 def error_callback(payload: Dict[str, Any], mode: str, reason: str) -> Dict[str, Any]:
-    analysis_id = str(payload.get("analysis_id") or payload.get("request_id") or "").strip()
+    analysis_id = str(
+        payload.get("analysis_id") or payload.get("request_id") or ""
+    ).strip()
     result: Dict[str, Any] = {
         "analysis_id": analysis_id,
         "output": {
@@ -536,14 +802,18 @@ def run_alphahunt_stage(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError(f"unsupported alphahunt analysis_mode: {mode}")
     timeout = (
         _env_int("HERMES_CODEX_TIMEOUT_SEC", DEFAULT_CODEX_TIMEOUT_SEC)
-        if mode in STAGE_MODES
+        if mode in CODEX_MODES
         else _env_int("HERMES_QWEN_TIMEOUT_SEC", DEFAULT_QWEN_TIMEOUT_SEC)
     )
     validation_error = ""
     for attempt in range(2):
         try:
             prompt = build_prompt(payload, validation_error=validation_error)
-            raw = call_codex_spark(prompt, timeout=timeout) if mode in STAGE_MODES else call_ollama(prompt, timeout=timeout)
+            raw = (
+                call_codex_spark(prompt, timeout=timeout)
+                if mode in CODEX_MODES
+                else call_ollama(prompt, timeout=timeout)
+            )
             model_obj = parse_json_object(raw)
             callback = normalize_callback(payload, model_obj)
         except requests.Timeout:
@@ -567,7 +837,9 @@ def run_qwen_stage(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def callback_headers(body: bytes, callback_auth: str = "") -> Dict[str, str]:
     headers = {"Content-Type": "application/json"}
-    api_key = os.environ.get("CENTRAL_CALLBACK_API_KEY", "").strip() or callback_auth.strip()
+    api_key = (
+        os.environ.get("CENTRAL_CALLBACK_API_KEY", "").strip() or callback_auth.strip()
+    )
     if api_key:
         headers["X-API-Key"] = api_key
         headers["Authorization"] = f"Bearer {api_key}"
@@ -585,11 +857,26 @@ def callback_headers(body: bytes, callback_auth: str = "") -> Dict[str, str]:
     return headers
 
 
-def post_callback(payload: Dict[str, Any], callback: Dict[str, Any], *, callback_url: str = "", callback_auth: str = "") -> None:
-    url = (callback_url or payload.get("callback_url") or os.environ.get("CENTRAL_CALLBACK_URL") or "").strip()
+def post_callback(
+    payload: Dict[str, Any],
+    callback: Dict[str, Any],
+    *,
+    callback_url: str = "",
+    callback_auth: str = "",
+) -> None:
+    url = (
+        callback_url
+        or payload.get("callback_url")
+        or os.environ.get("CENTRAL_CALLBACK_URL")
+        or ""
+    ).strip()
     if not url:
         return
     auth = callback_auth or str(payload.get("callback_auth") or "")
-    body = json.dumps(callback, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    resp = requests.post(url, data=body, headers=callback_headers(body, auth), timeout=15)
+    body = json.dumps(callback, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    resp = requests.post(
+        url, data=body, headers=callback_headers(body, auth), timeout=15
+    )
     resp.raise_for_status()

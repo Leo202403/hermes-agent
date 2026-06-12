@@ -82,34 +82,108 @@ def _stage_output(mode: str) -> dict:
             "matched_signals": [],
             "data_gap": [],
         },
+        "project_update_research": {
+            "status": "ok",
+            "update_markdown": "# Update\n\nSemantic review from supplied evidence only.",
+            "update_yaml": {
+                "changed_evidence": [
+                    {
+                        "source": "watchpoint_report",
+                        "observation": "Revenue watchpoint breached.",
+                        "impact": "The original demand assumption is weaker.",
+                    }
+                ],
+                "thesis_delta": "Thesis weakens because a core observable moved against the assumption.",
+                "risk_delta": ["Demand risk increased."],
+                "invalidation_delta": [
+                    "No full invalidation without a second confirming source."
+                ],
+                "observables_update": [
+                    {
+                        "name": "revenue_growth",
+                        "previous_status": "on_track",
+                        "current_status": "breached",
+                        "semantic_assessment": "material adverse change",
+                    }
+                ],
+                "next_check_at": "2026-06-19T00:00:00+00:00",
+                "confidence": 0.62,
+                "action_suggestion": "manual_review",
+                "data_gap": [],
+            },
+        },
+        "post_mortem_research": {
+            "status": "ok",
+            "post_mortem_markdown": "# Post-Mortem\n\nClosed-item error review.",
+            "evolution_proposal": {
+                "source_evolution": [
+                    {
+                        "proposal": "Downweight stale source snapshots.",
+                        "rationale": "The losing thesis relied on stale source data.",
+                    }
+                ],
+                "rule_evolution": [
+                    {
+                        "proposal": "Require explicit recency checks before green-lighting.",
+                        "rationale": "The breach existed before the original note.",
+                    }
+                ],
+                "threshold_evolution": [
+                    {
+                        "proposal": "Tighten watchpoint breach threshold for this asset class.",
+                        "rationale": "Prior threshold fired too late.",
+                    }
+                ],
+                "data_gap": [],
+                "confidence": 0.55,
+                "enforced": False,
+            },
+        },
     }
     return outputs[mode]
 
 
 def _model_json(mode: str) -> str:
-    return json.dumps(
-        {
-            "output": {
-                "stage": mode,
-                "stage_schema_version": alphahunt_stage.SCHEMA_VERSION_BY_MODE[mode],
-                "analyzer": (
-                    alphahunt_stage.CODEX_ANALYZER
-                    if mode in alphahunt_stage.STAGE_MODES
-                    else alphahunt_stage.QWEN_ANALYZER
-                ),
-                "model": alphahunt_stage.CODEX_MODEL if mode in alphahunt_stage.STAGE_MODES else alphahunt_stage.QWEN_MODEL,
-                "stage_output": _stage_output(mode),
-            }
+    return json.dumps({
+        "output": {
+            "stage": mode,
+            "stage_schema_version": alphahunt_stage.SCHEMA_VERSION_BY_MODE[mode],
+            "analyzer": (
+                alphahunt_stage.CODEX_ANALYZER
+                if mode in alphahunt_stage.CODEX_MODES
+                else alphahunt_stage.QWEN_ANALYZER
+            ),
+            "model": alphahunt_stage.CODEX_MODEL
+            if mode in alphahunt_stage.CODEX_MODES
+            else alphahunt_stage.QWEN_MODEL,
+            "stage_output": _stage_output(mode),
         }
-    )
+    })
 
 
-@pytest.mark.parametrize("mode", ["cleaner", "screener", "sentinel", "packager", "fast_triage"])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "cleaner",
+        "screener",
+        "sentinel",
+        "packager",
+        "fast_triage",
+        "project_update_research",
+        "post_mortem_research",
+    ],
+)
 def test_alphahunt_stage_returns_strict_json_callback(monkeypatch, mode):
-    if mode in alphahunt_stage.STAGE_MODES:
-        monkeypatch.setattr(alphahunt_stage, "call_codex_spark", lambda *args, **kwargs: _model_json(mode))
+    if mode in alphahunt_stage.CODEX_MODES:
+        monkeypatch.setattr(
+            alphahunt_stage,
+            "call_codex_spark",
+            lambda *args, **kwargs: _model_json(mode),
+        )
     else:
-        monkeypatch.setattr(alphahunt_stage, "call_ollama", lambda *args, **kwargs: _model_json(mode))
+        monkeypatch.setattr(
+            alphahunt_stage, "call_ollama", lambda *args, **kwargs: _model_json(mode)
+        )
 
     result = alphahunt_stage.run_alphahunt_stage(_payload(mode))
 
@@ -119,10 +193,14 @@ def test_alphahunt_stage_returns_strict_json_callback(monkeypatch, mode):
     assert result["analysis_id"] == f"req-{mode}"
     assert result["output"]["stage"] == mode
     assert result["output"]["analyzer"] == (
-        alphahunt_stage.CODEX_ANALYZER if mode in alphahunt_stage.STAGE_MODES else alphahunt_stage.QWEN_ANALYZER
+        alphahunt_stage.CODEX_ANALYZER
+        if mode in alphahunt_stage.CODEX_MODES
+        else alphahunt_stage.QWEN_ANALYZER
     )
     assert result["output"]["model"] == (
-        alphahunt_stage.CODEX_MODEL if mode in alphahunt_stage.STAGE_MODES else alphahunt_stage.QWEN_MODEL
+        alphahunt_stage.CODEX_MODEL
+        if mode in alphahunt_stage.CODEX_MODES
+        else alphahunt_stage.QWEN_MODEL
     )
     assert result["output"]["stage_output"]["status"] == "ok"
     ok, err = alphahunt_stage.validate_output(mode, result)
@@ -130,7 +208,14 @@ def test_alphahunt_stage_returns_strict_json_callback(monkeypatch, mode):
 
 
 def test_stage_prompt_examples_do_not_use_empty_objects():
-    for mode in ["cleaner", "screener", "sentinel", "packager"]:
+    for mode in [
+        "cleaner",
+        "screener",
+        "sentinel",
+        "packager",
+        "project_update_research",
+        "post_mortem_research",
+    ]:
         example = alphahunt_stage.expected_output_shape(mode)
         encoded = json.dumps(example, ensure_ascii=False, separators=(",", ":"))
         assert "{}" not in encoded
@@ -229,19 +314,32 @@ def test_fast_triage_decisions_validate(monkeypatch, decision):
 def test_is_alphahunt_stage_payload_matches_stage_and_fast_triage():
     assert alphahunt_stage.is_alphahunt_stage_payload(_payload("cleaner")) is True
     assert alphahunt_stage.is_alphahunt_stage_payload(_payload("fast_triage")) is True
-    assert alphahunt_stage.is_alphahunt_stage_payload({"analysis_mode": "rejudge"}) is False
-    assert alphahunt_stage.is_alphahunt_stage_payload(
-        {
+    assert (
+        alphahunt_stage.is_alphahunt_stage_payload(_payload("project_update_research"))
+        is True
+    )
+    assert (
+        alphahunt_stage.is_alphahunt_stage_payload(_payload("post_mortem_research"))
+        is True
+    )
+    assert (
+        alphahunt_stage.is_alphahunt_stage_payload({"analysis_mode": "rejudge"})
+        is False
+    )
+    assert (
+        alphahunt_stage.is_alphahunt_stage_payload({
             "analysis_mode": "cleaner",
             "context": {"routing_policy": {"preferred_engine": "codex_spark"}},
-        }
-    ) is True
-    assert alphahunt_stage.is_alphahunt_stage_payload(
-        {
+        })
+        is True
+    )
+    assert (
+        alphahunt_stage.is_alphahunt_stage_payload({
             "analysis_mode": "cleaner",
             "context": {"routing_policy": {"preferred_engine": "central"}},
-        }
-    ) is False
+        })
+        is False
+    )
 
 
 @pytest.mark.asyncio
@@ -279,7 +377,10 @@ async def test_analysis_endpoint_dispatches_alphahunt_stage_and_callback(monkeyp
     async with TestClient(TestServer(app)) as cli:
         resp = await cli.post(
             "/v1/analysis",
-            headers={"Authorization": "Bearer sk-test", "X-AlphaHunt-Callback-URL": "http://central/callback"},
+            headers={
+                "Authorization": "Bearer sk-test",
+                "X-AlphaHunt-Callback-URL": "http://central/callback",
+            },
             json=_payload("fast_triage"),
         )
         body = await resp.json()
@@ -288,7 +389,9 @@ async def test_analysis_endpoint_dispatches_alphahunt_stage_and_callback(monkeyp
     assert body["accepted"] is True
     assert body["analysis_id"] == "req-fast_triage"
     assert body["output"]["stage"] == "fast_triage"
-    assert captured["callback"]["output"]["stage_output"]["triage_decision"] == "advance"
+    assert (
+        captured["callback"]["output"]["stage_output"]["triage_decision"] == "advance"
+    )
     assert captured["callback_url"] == "http://central/callback"
 
 
@@ -336,5 +439,8 @@ async def test_analysis_endpoint_accepts_codex_spark_stage_payload(monkeypatch):
     assert body["accepted"] is True
     assert body["output"]["stage"] == "cleaner"
     assert body["output"]["analyzer"] == alphahunt_stage.CODEX_ANALYZER
-    assert captured["payload"]["context"]["routing_policy"]["preferred_engine"] == "codex_spark"
+    assert (
+        captured["payload"]["context"]["routing_policy"]["preferred_engine"]
+        == "codex_spark"
+    )
     assert captured["callback"]["output"]["stage_output"]["status"] == "ok"
