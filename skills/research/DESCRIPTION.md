@@ -1,3 +1,3 @@
 ---
-description: Skills for academic research, paper discovery, literature review, domain reconnaissance, market data, content monitoring, and scientific knowledge retrieval.
+description: Skills for rigorous research, literature review, market data, domain reconnaissance, content monitoring, and scientific retrieval.
 ---
